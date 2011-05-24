@@ -1,0 +1,288 @@
+#!/usr/bin/env python
+#
+# Copyright (c) 2011 Vit Suchomel and Jan Pomikalek
+# All rights reserved.
+#
+# This software is licensed as described in the file COPYING, which
+# you should have received as part of this distribution.
+
+import getopt
+import logging
+import os
+import sys
+
+from chared import __version__ as VERSION
+from chared.util.trigrams import Trigram
+from chared.util.encoding import get_encoding
+from chared.util.html2txt import html2txt
+from chared.detector import EncodingDetector, save_model
+
+DEFAULT_MIN_SIM = 0.5
+DEFAULT_MIN_ENC_FRQ = 0.005
+DEFAULT_FOLDS = 5
+
+def usage():
+    return """Usage: %(progname)s -o OUTPUT_FILE [OPTIONS] [FILE...]
+Create a character encoding detection model for a language from HTML files.
+
+Example: %(progname)s -o swahili.edm -S swahili_sample.txt swahili_pages/*.html
+
+Options:
+  -o, --output=FILE      output file
+  -S, --sample=FILE      language sample; a plain text file containing a sample
+                         text in the target language
+  -s, --min-sim=NUM      language sample similarity threshold (0 to 1); the
+                         input files with a similarity below the threshold are
+                         not used for building the model; default: %(min_sim).1f
+  -e, --min-enc-frq=NUM  a minimal relative frequency of an encoding (0 to 1);
+                         encodings with a lower frequency are ignored and not
+                         recognised by the created model; default: %(min_enc_frq).3f
+  -C, --no-crossval      do not evaluate the created model
+  -f, --folds=NUM        number of crossvalidation folds; default: %(folds)i
+
+  -V, --version          print version information and exit 
+  -h, --help             display this help and exit
+
+The input FILEs must be HTML files containing texts in the language for which
+the model is built. It is recommended to use at least 1000 files for training
+the model. The created model is written to the OUTPUT_FILE.
+
+It is also recommended to use a language sample for building the model (see
+the -s option). This helps to weed out bad content from the input FILEs and
+increases accuracy of the created model.
+""" % {
+    'progname': os.path.basename(sys.argv[0]),
+    'min_sim': DEFAULT_MIN_SIM,
+    'min_enc_frq': DEFAULT_MIN_ENC_FRQ,
+    'folds': DEFAULT_FOLDS,
+}
+
+def main():
+    logging.basicConfig(level=logging.INFO,
+        format=os.path.basename(sys.argv[0]) + ': %(levelname)s: %(message)s',
+        stream=sys.stderr)
+
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "o:S:s:e:Cf:hV", ["output=",
+            "sample=", "min-sim=", "min-enc-frq=", "no-crossval=", "folds=",
+            "help", "version"])
+    except getopt.GetoptError, err:
+        print >> sys.stderr, err
+        print >> sys.stderr, usage()
+        sys.exit(1)
+
+    opt_output = None
+    opt_sample = None
+    opt_min_sim = DEFAULT_MIN_SIM
+    opt_min_enc_freq = DEFAULT_MIN_ENC_FRQ
+    opt_crossval = True
+    opt_folds = DEFAULT_FOLDS
+
+    for o, a in opts:
+        if o in ("-h", "--help"):
+            print usage()
+            sys.exit(0)
+        elif o in ("-V", "--version"):
+            print "%s: chared %s\n\nCopyright (c) 2011 Vit Suchomel and Jan Pomikalek" % (
+                os.path.basename(sys.argv[0]), VERSION)
+            sys.exit(0)
+        elif o in ("-o", "--output"):
+            opt_output = a
+        elif o in ("-S", "--sample"):
+            opt_sample = a
+        elif o in ("-s", "--min-sim"):
+            try:
+                opt_min_sim = float(a)
+            except ValueError:
+                logging.critical("Invalid value for %s: '%s'. Float expected." % (o, a))
+                sys.exit(1)
+        elif o in ("-e", "--min-enc-frq"):
+            try:
+                opt_min_enc_freq = float(a)
+            except ValueError:
+                logging.critical("Invalid value for %s: '%s'. Float expected." % (o, a))
+                sys.exit(1)
+        elif o in ("-C", "--no-crossval"):
+            opt_crossval = False
+        elif o in ("-f", "--folds"):
+            try:
+                opt_folds = int(a)
+            except ValueError:
+                logging.critical("Invalid value for %s: '%s'. Integer expected." % (o, a))
+                sys.exit(1)
+
+    if not args:
+        logging.critical("No input files.")
+        print >> sys.stderr, usage()
+        sys.exit(1)
+
+    if not opt_output:
+        logging.critical("No output file specified.")
+        print >> sys.stderr, usage()
+        sys.exit(1)
+
+    #init
+    unicode_learn_files = []
+    encoded_learn_files = {}
+    encodings = {}
+
+    #learn trigrams using the lang sample file
+    lang_trig = None
+    if opt_sample:
+        logging.info("Bulding a language filter from %s" % opt_sample)
+        try:
+            lang_trig = Trigram(opt_sample)
+        except IOError as e:
+            logging.critical(str(e))
+            sys.exit(1)
+
+    #read all learning files from the data directory
+    logging.info("Reading and filtering data...")
+    for learn_file in args:
+        try:
+            fp = open(learn_file, 'r')
+        except IOError as e:
+            logging.critical("Unable to open %s for reading: %s",
+                learn_file, str(e))
+            sys.exit(1)
+        else:
+            file_content = fp.read()
+            fp.close()
+
+            #obtain the encoding and unicode content of the file
+            enc = get_encoding(file_content)
+            if not enc:
+                logging.warning("Ignoring %s: unable to determine charset from headers" % learn_file)
+                continue
+            try:
+                u_content = unicode(file_content, enc, 'ignore')
+            except LookupError:
+                logging.warning("Ignoring %s: unknown charset: %s" % (learn_file, enc))
+                continue
+
+            #convert to txt
+            try:
+                txt_content = html2txt(file_content, u_content)
+            except Exception as e:
+                logging.warning("Ignoring %s: error when converting to txt: %s"
+                    % (learn_file, str(e)))
+                continue
+            if not txt_content:
+                logging.warning("Ignoring %s: no text content" % learn_file)
+                continue
+
+            #filter out data files not corresponding to the lang
+            if lang_trig:
+                trig = Trigram()
+                trig.parseLines([txt_content.encode('utf_8')])
+                similarity = 1 - (lang_trig - trig)
+                if similarity < opt_min_sim:
+                    logging.warning("Ignoring %s: rejected by language filter (score: %.2f)" % (
+                        learn_file, similarity))
+                    continue
+
+            #update encodings
+            encodings[enc] = encodings.get(enc, 0) + 1
+
+            #add decoded content to the learn files list
+            unicode_learn_files.append(u_content)
+
+    #remove rare/unimportant encodings
+    files_passed = len(unicode_learn_files)
+    logging.info("Files passed: %d" % files_passed)
+    if files_passed <= 0:
+        logging.critical("No usable input data. Exiting.")
+        sys.exit(1)
+    logging.info("Charset\tfreq\trel freq")
+    encs_to_delete = []
+    for enc, freq in sorted(encodings.items(), lambda x, y: cmp(y[1], x[1])):
+        rel_freq = float(freq) / files_passed
+        msg = "%s\t%i\t%.4f" % (enc, freq, rel_freq)
+        if rel_freq < opt_min_enc_freq:
+            msg += "\tremoving: rel freq below threshold"
+            encs_to_delete.append(enc)
+        logging.info(msg)
+    for enc in encs_to_delete:
+        del(encodings[enc])
+
+    #chech if there are any encodings left
+    if not encodings:
+        logging.critical("No charsets left. Exiting.")
+        sys.exit(1)
+
+    #convert the data to all lang specific encodings
+    logging.info("Converting input data to all detected charsets...")
+    for enc in encodings.keys():
+        encoded_learn_files[enc] = []
+    for u_html in unicode_learn_files:
+        for enc in encodings.keys():
+            encoded_learn_files[enc].append(u_html.encode(enc, 'ignore'))
+    encodings_sorted = sorted(encodings, key=encodings.get, reverse=True)
+
+    #do crossvalidation
+    if opt_crossval:
+        #init
+        test_data = {}
+        accuracy = {}
+        for enc in encodings.keys():
+            accuracy[enc] = {'correct': 0, 'total': 0}
+
+        #evaluate the detector for each validation fold
+        logging.info("Crossvalidation...")
+        for fold in range(opt_folds):
+            logging.info("Fold %i/%i" % (fold + 1, opt_folds))
+            #create a new detector object
+            detect = EncodingDetector()
+            detect.set_encodings_order(encodings_sorted)
+            #train a model for each encoding, prepare test data
+            for enc in encodings.keys():
+                learn_data = []
+                test_data[enc] = []
+                for j, document in enumerate(encoded_learn_files[enc]):
+                    if fold == j % opt_folds:
+                        test_data[enc].append(document)
+                    else:
+                        learn_data.append(document)
+                detect.train(' '.join(learn_data), enc)
+            detect.reduce_vectors()
+            #evaluate the detector for each validation fold
+            for enc in encodings.keys():
+                correct = 0
+                for test_item in test_data[enc]:
+                    clas = detect.classify(test_item)
+                    if enc in clas:
+                        correct += 1
+                accuracy[enc]['correct'] += correct
+                accuracy[enc]['total'] += len(test_data[enc])
+
+        #print validation result
+        lang_correct = 0
+        lang_total = 0
+        for enc in encodings.keys():
+            if 0 < accuracy[enc]['total']:
+                acc = accuracy[enc]['correct'] * 100 / accuracy[enc]['total']
+                lang_correct += accuracy[enc]['correct']
+                lang_total += accuracy[enc]['total']
+                logging.info("Accuracy for %s:\t%.1f%% (%i/%i)" % (
+                    enc, acc, accuracy[enc]['correct'], accuracy[enc]['total']))
+        lang_acc = lang_correct * 100 / lang_total
+        logging.info("Average accuracy: %.1f%%" % lang_acc)
+
+    #learn encodings models using all data
+    logging.info("Building final model...")
+    detect = EncodingDetector()
+    detect.set_encodings_order(encodings_sorted)
+    for enc in encodings.keys():
+        detect.train(' '.join(encoded_learn_files[enc]), enc)
+    detect.reduce_vectors()
+
+    #store the detector model
+    logging.info("Saving mode to %s" % opt_output)
+    try:
+        save_model(detect, opt_output)
+    except IOError as e:
+        logging.critical("Unable save: %s" % str(e))
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()

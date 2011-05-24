@@ -1,0 +1,4 @@
+include COPYING
+include README
+include MANIFEST.in
+recursive-include chared *.edm

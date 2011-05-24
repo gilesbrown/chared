@@ -1,0 +1,119 @@
+#!/usr/bin/env python
+#
+# Copyright (c) 2011 Vit Suchomel and Jan Pomikalek
+# All rights reserved.
+#
+# This software is licensed as described in the file COPYING, which
+# you should have received as part of this distribution.
+
+import getopt
+import logging
+import os
+import re
+import sys
+import urllib2
+
+from chared import __version__ as VERSION
+from chared.detector import list_models, get_model_path, load_model, \
+    EncodingDetector
+
+def usage():
+    return """Usage: %(progname)s -m MODEL [OPTIONS] [FILE_OR_URL]
+Detect the character encoding for the FILE_OR_URL using the specified MODEL.
+
+Example: %(progname)s -m czech http://nlp.fi.muni.cz/
+
+  --list-models    print a list of inbuilt models and exit
+  -V, --version    print version information and exit 
+  -h, --help       display this help and exit
+
+If no FILE_OR_URL specified, input is read from stdin.
+
+MODEL can be a name of an inbuilt model (see `$(progname)s --list-models`)
+or a file containing a character encoding detection model.
+""" % {
+    'progname': os.path.basename(sys.argv[0]),
+}
+
+def main():
+    logging.basicConfig(level=logging.INFO,
+        format=os.path.basename(sys.argv[0]) + ': %(message)s',
+        stream=sys.stderr)
+
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "m:hV", ["list-models",
+            "help", "version"])
+    except getopt.GetoptError, err:
+        print >> sys.stderr, err
+        print >> sys.stderr, usage()
+        sys.exit(1)
+
+    encoding_detector = None
+
+    for o, a in opts:
+        if o in ("-h", "--help"):
+            print usage()
+            sys.exit(0)
+        if o in ("-V", "--version"):
+            print "%s: chared %s\n\nCopyright (c) 2011 Vit Suchomel and Jan Pomikalek" % (
+                os.path.basename(sys.argv[0]), VERSION)
+            sys.exit(0)
+        elif o == "--list-models":
+            print "\n".join(list_models())
+            sys.exit(0)
+        elif o == "-m":
+            if os.path.isfile(a):
+                model_file = a
+            elif a in list_models():
+                model_file = get_model_path(a)
+            else:
+                if re.match('^\w*$', a):
+                    # only alphabetical chars, probably misspelled or
+                    # unsupported language
+                    logging.critical(
+                        "Unknown model: %s\nAvailable models:\n%s" % (
+                            a, '\n'.join(list_models())))
+                    sys.exit(1)
+                else:
+                    # probably incorrectly specified path
+                    logging.critical("File not found: %s" % a)
+                    sys.exit(1)
+            try:
+                encoding_detector = load_model(path=model_file)
+                if not isinstance(encoding_detector, EncodingDetector):
+                    raise TypeError
+            except:
+                raise
+                logging.critical("Unable to load charset detection model from %s. "
+                    "Invalid data format." % model_file)
+                sys.exit(1)
+
+    if not encoding_detector:
+        logging.critical("No character encoding detection model specified.")
+        print >> sys.stderr, usage()
+        sys.exit(1)
+
+    # read the input
+    if len(args) >= 1:
+        input_file = args[0]
+        try:
+            if '://' in input_file:
+                fp = urllib2.urlopen(input_file)
+            else:
+                fp = open(input_file, 'r')
+        except urllib2.URLError as e:
+            logging.critical("Unable to open %s for reading: %s" % (input_file, e))
+            sys.exit(1)
+    else:
+        fp = sys.stdin
+    input_data = fp.read()
+
+    #classify the input data
+    clas = encoding_detector.classify(input_data)
+    if clas:
+        print clas[0]
+    else:
+        print 'unknown encoding'
+
+if __name__ == '__main__':
+    main()
