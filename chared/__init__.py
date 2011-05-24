@@ -7,4 +7,5 @@
 try:
     __version__ = 'v' + __import__('pkg_resources').get_distribution('chared').version
 except:
-    __version__ = 'r$Rev$'
+    import re
+    __version__ = re.sub('.*(\d+).*', r'rev\1', '$Rev$')
