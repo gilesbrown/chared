@@ -10,16 +10,22 @@ import getopt
 import logging
 import os
 import sys
+import datetime
+import codecs
 
 from chared import __version__ as VERSION
 from chared.util.trigrams import Trigram
 from chared.util.encoding import get_encoding
 from chared.util.html2txt import html2txt
-from chared.detector import EncodingDetector, save_model
+from chared.detector import EncodingDetector, replace_by_zero
 
 DEFAULT_MIN_SIM = 0.5
 DEFAULT_MIN_ENC_FRQ = 0.005
 DEFAULT_FOLDS = 5
+
+#Register function dealing with unknown characters while encoding test data.
+codecs.register_error('replace_by_zero', replace_by_zero)
+
 
 def usage():
     return """Usage: %(progname)s -o OUTPUT_FILE [OPTIONS] [FILE...]
@@ -39,6 +45,7 @@ Options:
                          recognised by the created model; default: %(min_enc_frq).3f
   -C, --no-crossval      do not evaluate the created model
   -f, --folds=NUM        number of crossvalidation folds; default: %(folds)i
+  -M, --no-model         do not build the final model
 
   -V, --version          print version information and exit 
   -h, --help             display this help and exit
@@ -63,9 +70,9 @@ def main():
         stream=sys.stderr)
 
     try:
-        opts, args = getopt.getopt(sys.argv[1:], "o:S:s:e:Cf:hV", ["output=",
+        opts, args = getopt.getopt(sys.argv[1:], "o:S:s:e:Cf:MhV", ["output=",
             "sample=", "min-sim=", "min-enc-frq=", "no-crossval=", "folds=",
-            "help", "version"])
+            "no-model", "help", "version"])
     except getopt.GetoptError, err:
         print >> sys.stderr, err
         print >> sys.stderr, usage()
@@ -77,6 +84,7 @@ def main():
     opt_min_enc_freq = DEFAULT_MIN_ENC_FRQ
     opt_crossval = True
     opt_folds = DEFAULT_FOLDS
+    opt_final_model = True
 
     for o, a in opts:
         if o in ("-h", "--help"):
@@ -110,18 +118,21 @@ def main():
             except ValueError:
                 logging.critical("Invalid value for %s: '%s'. Integer expected." % (o, a))
                 sys.exit(1)
+        elif o in ("-M", "--no-model"):
+            opt_final_model = False
 
     if not args:
         logging.critical("No input files.")
         print >> sys.stderr, usage()
         sys.exit(1)
 
-    if not opt_output:
+    if not opt_output and opt_final_model:
         logging.critical("No output file specified.")
         print >> sys.stderr, usage()
         sys.exit(1)
 
     #init
+    logging.info('START: %s' % datetime.datetime.now())
     unicode_learn_files = []
     encoded_learn_files = {}
     encodings = {}
@@ -129,7 +140,7 @@ def main():
     #learn trigrams using the lang sample file
     lang_trig = None
     if opt_sample:
-        logging.info("Bulding a language filter from %s" % opt_sample)
+        logging.info("Building a language filter from %s" % opt_sample)
         try:
             lang_trig = Trigram(opt_sample)
         except IOError as e:
@@ -155,7 +166,7 @@ def main():
                 logging.warning("Ignoring %s: unable to determine charset from headers" % learn_file)
                 continue
             try:
-                u_content = unicode(file_content, enc, 'ignore')
+                u_content = unicode(file_content, enc, 'replace_by_zero')
             except LookupError:
                 logging.warning("Ignoring %s: unknown charset: %s" % (learn_file, enc))
                 continue
@@ -185,7 +196,8 @@ def main():
             encodings[enc] = encodings.get(enc, 0) + 1
 
             #add decoded content to the learn files list
-            unicode_learn_files.append(u_content)
+            learn_file_tail = os.path.split(learn_file)[1]
+            unicode_learn_files.append((learn_file_tail, u_content))
 
     #remove rare/unimportant encodings
     files_passed = len(unicode_learn_files)
@@ -205,7 +217,7 @@ def main():
     for enc in encs_to_delete:
         del(encodings[enc])
 
-    #chech if there are any encodings left
+    #check if there are any encodings left
     if not encodings:
         logging.critical("No charsets left. Exiting.")
         sys.exit(1)
@@ -214,9 +226,10 @@ def main():
     logging.info("Converting input data to all detected charsets...")
     for enc in encodings.keys():
         encoded_learn_files[enc] = []
-    for u_html in unicode_learn_files:
+    for learn_file, u_html in unicode_learn_files:
         for enc in encodings.keys():
-            encoded_learn_files[enc].append(u_html.encode(enc, 'ignore'))
+            encoded_html = u_html.encode(enc, 'replace_by_zero')
+            encoded_learn_files[enc].append((learn_file, encoded_html))
     encodings_sorted = sorted(encodings, key=encodings.get, reverse=True)
 
     #do crossvalidation
@@ -225,7 +238,8 @@ def main():
         test_data = {}
         accuracy = {}
         for enc in encodings.keys():
-            accuracy[enc] = {'correct': 0, 'total': 0}
+            accuracy[enc] = {'correct': 0.0, 'total': 0.0, 'accuracy': 0.0}
+        conf_mx = {}
 
         #evaluate the detector for each validation fold
         logging.info("Crossvalidation...")
@@ -238,20 +252,43 @@ def main():
             for enc in encodings.keys():
                 learn_data = []
                 test_data[enc] = []
-                for j, document in enumerate(encoded_learn_files[enc]):
+                for j, (learn_file, document) in enumerate(encoded_learn_files[enc]):
                     if fold == j % opt_folds:
-                        test_data[enc].append(document)
+                        test_data[enc].append((learn_file, document))
                     else:
                         learn_data.append(document)
                 detect.train(' '.join(learn_data), enc)
             detect.reduce_vectors()
+            detect.normalize_vectors()
             #evaluate the detector for each validation fold
             for enc in encodings.keys():
                 correct = 0
-                for test_item in test_data[enc]:
-                    clas = detect.classify(test_item)
-                    if enc in clas:
+                for test_file, test_doc in test_data[enc]:
+                    clas = detect.classify(test_doc)
+                    class_correct = False
+                    if enc in clas and 1 == len(clas):
+                        #a classification is correct when it matches the file 
+                        #encoding and it is a single result of the classifier
+                        class_correct = True
+                    else:
+                        #a classification is not wrong when the guessed and 
+                        #the right encoding version of the document are equal
+                        for e in clas:
+                            try:
+                                if unicode(test_doc, e) == unicode(test_doc, enc):
+                                    class_correct = True
+                                    break
+                            except UnicodeDecodeError:
+                                pass
+                    #update the confusion matrix
+                    if class_correct:
                         correct += 1
+                        conf_mx[(enc, enc)] = conf_mx.get((enc, enc), 0) + 1
+                    else:
+                        for e in clas:
+                            conf_mx[(enc, e)] = conf_mx.get((enc, e), 0) + 1
+                        logging.info('File %s: encoding %s classified as [%s]' %
+                            (test_file, enc, ','.join(clas)))
                 accuracy[enc]['correct'] += correct
                 accuracy[enc]['total'] += len(test_data[enc])
 
@@ -261,28 +298,48 @@ def main():
         for enc in encodings.keys():
             if 0 < accuracy[enc]['total']:
                 acc = accuracy[enc]['correct'] * 100 / accuracy[enc]['total']
+                accuracy[enc]['accuracy'] = acc
                 lang_correct += accuracy[enc]['correct']
                 lang_total += accuracy[enc]['total']
                 logging.info("Accuracy for %s:\t%.1f%% (%i/%i)" % (
                     enc, acc, accuracy[enc]['correct'], accuracy[enc]['total']))
         lang_acc = lang_correct * 100 / lang_total
         logging.info("Average accuracy: %.1f%%" % lang_acc)
+        #weighted total accuracy
+        weighted_sum = 0.0
+        for enc in encodings.keys():
+            weighted_sum += accuracy[enc]['accuracy'] * encodings[enc]
+        logging.info("Weighted accuracy: %.1f%%" % (weighted_sum / files_passed))
+        #print confusion matrix
+        logging.info('CONF MX\t%s' % '\t'.join(encodings.keys()))
+        for enc in encodings.keys():
+            conf_mx_row = [enc]
+            for e in encodings.keys():
+                conf_mx_row.append('%03d' % conf_mx.get((enc, e), 0.0))
+            logging.info('\t'.join(conf_mx_row))
 
-    #learn encodings models using all data
-    logging.info("Building final model...")
-    detect = EncodingDetector()
-    detect.set_encodings_order(encodings_sorted)
-    for enc in encodings.keys():
-        detect.train(' '.join(encoded_learn_files[enc]), enc)
-    detect.reduce_vectors()
+    if opt_final_model:
+        #learn encodings models using all data
+        logging.info("Building final model...")
+        detect = EncodingDetector()
+        detect.set_encodings_order(encodings_sorted)
+        for enc in encodings.keys():
+            learn_texts = []
+            for learn_file, encoded_text in encoded_learn_files[enc]:
+                learn_texts.append(encoded_text)
+            detect.train(' '.join(learn_texts), enc)
+        detect.reduce_vectors()
+        detect.normalize_vectors()
 
-    #store the detector model
-    logging.info("Saving mode to %s" % opt_output)
-    try:
-        save_model(detect, opt_output)
-    except IOError as e:
-        logging.critical("Unable save: %s" % str(e))
-        sys.exit(1)
+        #store the detector model
+        logging.info("Saving model to %s" % opt_output)
+        try:
+            detect.save(opt_output)
+        except IOError as e:
+            logging.critical("Unable to save: %s" % str(e))
+            sys.exit(1)
+
+    logging.info('FINISH: %s' % datetime.datetime.now())
 
 if __name__ == '__main__':
     main()

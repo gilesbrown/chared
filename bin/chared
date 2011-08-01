@@ -14,12 +14,11 @@ import sys
 import urllib2
 
 from chared import __version__ as VERSION
-from chared.detector import list_models, get_model_path, load_model, \
-    EncodingDetector
+from chared.detector import list_models, get_model_path, EncodingDetector
 
 def usage():
-    return """Usage: %(progname)s -m MODEL [OPTIONS] [FILE_OR_URL]
-Detect the character encoding for the FILE_OR_URL using the specified MODEL.
+    return """Usage: %(progname)s -m MODEL [OPTIONS] [FILE_OR_URL...]
+Detect the character encoding for the FILE_OR_URL(s) using the specified MODEL.
 
 Example: %(progname)s -m czech http://nlp.fi.muni.cz/
 
@@ -79,11 +78,8 @@ def main():
                     logging.critical("File not found: %s" % a)
                     sys.exit(1)
             try:
-                encoding_detector = load_model(path=model_file)
-                if not isinstance(encoding_detector, EncodingDetector):
-                    raise TypeError
+                encoding_detector = EncodingDetector.load(model_file)
             except:
-                raise
                 logging.critical("Unable to load charset detection model from %s. "
                     "Invalid data format." % model_file)
                 sys.exit(1)
@@ -93,27 +89,33 @@ def main():
         print >> sys.stderr, usage()
         sys.exit(1)
 
-    # read the input
+    #read and classify the input document(s)
     if len(args) >= 1:
-        input_file = args[0]
-        try:
-            if '://' in input_file:
-                fp = urllib2.urlopen(input_file)
+        for input_file in args:
+            #read the input document
+            try:
+                if '://' in input_file:
+                    fp = urllib2.urlopen(input_file)
+                else:
+                    fp = open(input_file, 'r')
+                document = fp.read()
+            except (urllib2.URLError, IOError) as e:
+                logging.critical("Unable to open %s for reading: %s" % (input_file, e))
+                continue
+            #do the classification
+            clas = encoding_detector.classify(document)
+            if clas:
+                clas_result = clas[0]
             else:
-                fp = open(input_file, 'r')
-        except urllib2.URLError as e:
-            logging.critical("Unable to open %s for reading: %s" % (input_file, e))
-            sys.exit(1)
+                clas_result = 'unknown encoding'
+            print "%s:\t%s" % (input_file, clas_result)
     else:
-        fp = sys.stdin
-    input_data = fp.read()
-
-    #classify the input data
-    clas = encoding_detector.classify(input_data)
-    if clas:
-        print clas[0]
-    else:
-        print 'unknown encoding'
+        #classify a document at stdin
+        clas = encoding_detector.classify(sys.stdin.read())
+        if clas:
+            print clas[0]
+        else:
+            print 'unknown encoding'
 
 if __name__ == '__main__':
     main()

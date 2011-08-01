@@ -8,7 +8,9 @@
 
 import os
 import sys
-import cPickle as pickle
+import struct
+
+ENCODE_REPLACEMENT_CHARACTER = '\x00'
 
 def list_models():
     "Returns a list of inbuilt models."
@@ -18,7 +20,7 @@ def list_models():
     for filename in os.listdir(models_dir):
         if filename.endswith('.edm'):
             models.append(filename.rsplit('.', 1)[0])
-    return models
+    return sorted(models)
 
 def get_model_path(model_id):
     """
@@ -33,45 +35,101 @@ def get_model_path(model_id):
     else:
         return None
 
-def save_model(model, path):
-    "Saves the model to the specified path."
-    with open(path, 'w') as fp:
-        pickle.dump(model, fp)
-
-def load_model(path):
-    "Loads the model from the specified path."
-    with open(path, 'r') as fp:
-        model = pickle.load(fp)
-        return model
-    return None
-
-def union(list1, list2):
-    "Returns a list of all distinct elements which occur in list1 or in list2."
-    return list(set(list1).union(list2))
-
 def scalar_product(vec1, vec2):
     "Returns a scalar product of the two vectors."
-    indices = union(vec1.keys(), vec2.keys())
-    result = 0
-    for i in indices:
-        if vec1.has_key(i) and vec2.has_key(i):
-            result += vec1[i] * vec2[i]
+    result = 0.0
+    for key in vec1.keys():
+        if vec2.has_key(key):
+            result += vec1[key] * vec2[key]
     return result
 
+def replace_by_zero(error):
+    """
+    Replaces unknown bytes while encoding/decoding.
+    The function has to be registered using codecs.register_error.
+    """
+    if isinstance(error, UnicodeEncodeError):
+        return (unicode(ENCODE_REPLACEMENT_CHARACTER), error.end)
+    elif isinstance(error, UnicodeDecodeError):
+        return (u'\ufffd', error.end)
+    raise error
+
+
 class EncodingDetector(object):
-    def __init__(self):
-        self._vectors = {}
-        self._encodings_order = ()
-        self._version = '1.0'
+    VECTOR_TUPLE_LENGTH = 3 
+
+    def __init__(self, version='1.1', vectors={}, enc_order=()):
+        self._version = version
+        self._vectors = vectors
+        self._encodings_order = enc_order
+
+    def get_version(self):
+        return self._version
+
+    def save(self, path):
+        """
+        Saves the model to the specified path.
+        File format:
+        general row: <verison><TAB><tuple length><TAB><encodings count>
+        for each encoding:
+            info row: <name><TAB><order><TAB><vector length>
+            vector row: <key><packed value>...
+        """
+        with open(path, 'w') as fp:
+            #basic attributes
+            fp.write('%s\t%d\t%d\n' % 
+                (self._version, self.VECTOR_TUPLE_LENGTH, len(self._vectors)))
+            #vectors
+            for enc, vector in self._vectors.iteritems():
+                #encoding name, encoding order
+                vect_len = len(vector)
+                enc_order = self.get_encoding_order(enc)
+                fp.write('%s\t%d\t%d\n' % (enc, enc_order, vect_len))
+                #vector keys & values
+                for k, v in vector.iteritems():
+                    fp.write('%s%s' % (k, struct.pack('d', v)))
+                fp.write('\n')
+
+    @classmethod
+    def load(cls, path):
+        """
+        Loads the model from the specified path.
+        Returns a new instance of EncodingDetector.
+        """
+        version = ''
+        vectors = {}
+        enc_order = {}
+        with open(path, 'r') as fp:
+            #basic attributes
+            version, vect_tuple_length, enc_count = fp.readline().split('\t')
+            vect_tuple_length = int(vect_tuple_length)
+            #vectors
+            for i in range(int(enc_count)):
+                #encoding name, encoding order
+                enc, order, vect_len = fp.readline().split('\t')
+                enc_order[int(order)] = enc
+                #vector keys & values
+                vectors[enc] = {}
+                for j in range(int(vect_len)):
+                    key = fp.read(vect_tuple_length)
+                    vectors[enc][key] = struct.unpack('d', fp.read(8))[0]
+                fp.read(1)
+        return EncodingDetector(version, vectors, enc_order.values())
 
     def vectorize(self, string):
         """
-        Transforms the input strings into a frequency vector of contained
-        characters.
+        Transforms the input strings into a frequency vector of n-grams of 
+        contained characters.
+        Omits vector keys containing the encoding replacement character.
         """
+        str_len = len(string)
+        if self.VECTOR_TUPLE_LENGTH > str_len:
+            return {}
         vector = {}
-        for ch in string:
-            vector[ch] = vector.get(ch, 0) + 1.0
+        for i in range(str_len - self.VECTOR_TUPLE_LENGTH + 1):
+            key = string[i:i + self.VECTOR_TUPLE_LENGTH]
+            if ENCODE_REPLACEMENT_CHARACTER not in key:
+                vector[key] = vector.get(key, 0.0) + 1.0
         return vector
 
     def train(self, string, encoding):
@@ -106,41 +164,47 @@ class EncodingDetector(object):
         returned in the order of importance (see set_encodings_order). Empty
         list may be returned if there are no valid candidates. 
         """
-
         input_vector = self.vectorize(string)
-
         classification = []
-        for clas in self._vectors.keys():
-            #get scalar product of the vectors
-            vector = self._vectors[clas]
-            product = scalar_product(input_vector, vector)
-            clas_info = {'clas': clas, 'product': product,
+        for clas, vector in self._vectors.iteritems():
+            score = scalar_product(input_vector, vector)
+            clas_info = {'clas': clas, 'score': score,
                 'order': self.get_encoding_order(clas)}
-            #exclude utf8 in case data is not convertible to utf8
-            if 'utf_8' == clas:
-                try:
-                    unicode(string, 'utf_8', 'strict')
-                except ValueError:
-                    clas_info['product'] = 0.0
             classification.append(clas_info)
 
         if not classification:
             return []
 
         #order result classes 
-        # 1.) by vector products (higher product is better)
+        # 1.) by vector similarity score (higher score is better)
         # 2.) by the encoding order (lower index is better)
         classification.sort(lambda x, y:
-            cmp(y['product'], x['product']) or cmp(x['order'], y['order']))
+            cmp(y['score'], x['score']) or cmp(x['order'], y['order']))
 
         #return a list of the top classes
         # the top classes have the same score and order as the first one
         first = classification[0]
         result = []
         for clas in classification:
-            if first['product'] == clas['product']:
+            if first['score'] == clas['score']:
                 result.append(clas['clas'])
         return result
+
+    def normalize_vectors(self):
+        "Normalize the vectors using average vector values sum."
+        vect_count = len(self._vectors)
+        if not self._vectors:
+            return
+        vect_sum = 0.0
+        for vect in self._vectors.values():
+            vect_sum += sum(vect.values())
+        avg_sum = float(vect_sum) / vect_count
+        new_vectors = {}
+        for clas, vect in self._vectors.iteritems():
+            new_vectors[clas] = {}
+            for k, v in vect.iteritems():
+                new_vectors[clas][k] = v / avg_sum
+        self._vectors = new_vectors
 
     def reduce_vectors(self):
         """
@@ -149,17 +213,17 @@ class EncodingDetector(object):
         on the same data for all encodings, reducing vectors increases both
         efficiency and accuracy of the classification.
         """
-        #get frequencies of (character, value) pairs
-        char_value_count = {}
+        #get frequencies of (key, value) pairs
+        key_value_count = {}
         for vect in self._vectors.values():
-            for ch, value in vect.iteritems():
-                char_value_count[(ch, value)] = char_value_count.get(
-                    (ch, value), 0) + 1
-        #remove common parts of vectors (the (character, value) pairs with the
+            for key, value in vect.iteritems():
+                key_value_count[(key, value)] = key_value_count.get(
+                    (key, value), 0) + 1
+        #remove common parts of vectors (the (key, value) pairs with the
         #frequency equal to the number of vectors)
         encodings_count = len(self._vectors)
-        for (ch, value), count in char_value_count.iteritems():
+        for (key, value), count in key_value_count.iteritems():
             if count >= encodings_count:
                 for vect in self._vectors.values():
-                    if vect.has_key(ch):
-                        del vect[ch]
+                    if vect.has_key(key):
+                        del vect[key]
