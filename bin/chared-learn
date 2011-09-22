@@ -259,7 +259,6 @@ def main():
                         learn_data.append(document)
                 detect.train(' '.join(learn_data), enc)
             detect.reduce_vectors()
-            detect.normalize_vectors()
             #evaluate the detector for each validation fold
             for enc in encodings.keys():
                 correct = 0
@@ -329,7 +328,6 @@ def main():
                 learn_texts.append(encoded_text)
             detect.train(' '.join(learn_texts), enc)
         detect.reduce_vectors()
-        detect.normalize_vectors()
 
         #store the detector model
         logging.info("Saving model to %s" % opt_output)

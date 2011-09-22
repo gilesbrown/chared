@@ -37,7 +37,7 @@ def get_model_path(model_id):
 
 def scalar_product(vec1, vec2):
     "Returns a scalar product of the two vectors."
-    result = 0.0
+    result = 0
     for key in vec1.keys():
         if vec2.has_key(key):
             result += vec1[key] * vec2[key]
@@ -56,9 +56,9 @@ def replace_by_zero(error):
 
 
 class EncodingDetector(object):
-    VECTOR_TUPLE_LENGTH = 3 
+    VECTOR_TUPLE_LENGTH = 3
 
-    def __init__(self, version='1.1', vectors={}, enc_order=()):
+    def __init__(self, version='1.3', vectors={}, enc_order=()):
         self._version = version
         self._vectors = vectors
         self._encodings_order = enc_order
@@ -87,7 +87,7 @@ class EncodingDetector(object):
                 fp.write('%s\t%d\t%d\n' % (enc, enc_order, vect_len))
                 #vector keys & values
                 for k, v in vector.iteritems():
-                    fp.write('%s%s' % (k, struct.pack('d', v)))
+                    fp.write('%s%s' % (k, struct.pack('I', v)))
                 fp.write('\n')
 
     @classmethod
@@ -112,7 +112,7 @@ class EncodingDetector(object):
                 vectors[enc] = {}
                 for j in range(int(vect_len)):
                     key = fp.read(vect_tuple_length)
-                    vectors[enc][key] = struct.unpack('d', fp.read(8))[0]
+                    vectors[enc][key] = struct.unpack('I', fp.read(4))[0]
                 fp.read(1)
         return EncodingDetector(version, vectors, enc_order.values())
 
@@ -129,7 +129,7 @@ class EncodingDetector(object):
         for i in range(str_len - self.VECTOR_TUPLE_LENGTH + 1):
             key = string[i:i + self.VECTOR_TUPLE_LENGTH]
             if ENCODE_REPLACEMENT_CHARACTER not in key:
-                vector[key] = vector.get(key, 0.0) + 1.0
+                vector[key] = vector.get(key, 0) + 1
         return vector
 
     def train(self, string, encoding):
@@ -189,22 +189,6 @@ class EncodingDetector(object):
             if first['score'] == clas['score']:
                 result.append(clas['clas'])
         return result
-
-    def normalize_vectors(self):
-        "Normalize the vectors using average vector values sum."
-        vect_count = len(self._vectors)
-        if not self._vectors:
-            return
-        vect_sum = 0.0
-        for vect in self._vectors.values():
-            vect_sum += sum(vect.values())
-        avg_sum = float(vect_sum) / vect_count
-        new_vectors = {}
-        for clas, vect in self._vectors.iteritems():
-            new_vectors[clas] = {}
-            for k, v in vect.iteritems():
-                new_vectors[clas][k] = v / avg_sum
-        self._vectors = new_vectors
 
     def reduce_vectors(self):
         """
