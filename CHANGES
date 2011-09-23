@@ -1,0 +1,13 @@
+= Changelog for chared =
+
+== v1.2 (23 Sep 2011) ==
+ * FEATURE: Removed normalization of model vectors since it doesn't affect
+            results in any way. This enabled making the stored models smaller. 
+
+== v1.1 (1 Aug 2011) ==
+ * FEATURE: Models based on n-grams of characters (trigrams by default).
+ * FEATURE: More useful output when testing multiple documents.
+ * FEATURE: Confusion matrix can be printed when learning new models. 
+
+== v1.0 (24 Apr 2011) ==
+ * First public release.
