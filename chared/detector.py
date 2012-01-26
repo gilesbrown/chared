@@ -1,4 +1,4 @@
-# Copyright (c) 2011 Vit Suchomel and Jan Pomikalek
+# Copyright (c) 2011-2012 Vit Suchomel and Jan Pomikalek
 # All rights reserved.
 #
 # This software is licensed as described in the file COPYING, which
@@ -11,6 +11,7 @@ import sys
 import struct
 
 ENCODE_REPLACEMENT_CHARACTER = '\x00'
+MODEL_VERSION = '1.3'
 
 def list_models():
     "Returns a list of inbuilt models."
@@ -58,7 +59,7 @@ def replace_by_zero(error):
 class EncodingDetector(object):
     VECTOR_TUPLE_LENGTH = 3
 
-    def __init__(self, version='1.3', vectors={}, enc_order=()):
+    def __init__(self, version=MODEL_VERSION, vectors={}, enc_order=()):
         self._version = version
         self._vectors = vectors
         self._encodings_order = enc_order
@@ -102,6 +103,9 @@ class EncodingDetector(object):
         with open(path, 'r') as fp:
             #basic attributes
             version, vect_tuple_length, enc_count = fp.readline().split('\t')
+            if MODEL_VERSION != version:
+                sys.stderr.write('WARNING: Potentially incompatible model versions!\n')
+                sys.stderr.write('\t%s: %s\n\tthis module: %s\n' % (path, version, MODEL_VERSION))
             vect_tuple_length = int(vect_tuple_length)
             #vectors
             for i in range(int(enc_count)):
