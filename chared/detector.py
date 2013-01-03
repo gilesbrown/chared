@@ -76,7 +76,7 @@ class EncodingDetector(object):
             info row: <name><TAB><order><TAB><vector length>
             vector row: <key><packed value>...
         """
-        with open(path, 'w') as fp:
+        with open(path, 'wb') as fp:
             #basic attributes
             fp.write('%s\t%d\t%d\n' % 
                 (self._version, self.VECTOR_TUPLE_LENGTH, len(self._vectors)))
@@ -88,7 +88,7 @@ class EncodingDetector(object):
                 fp.write('%s\t%d\t%d\n' % (enc, enc_order, vect_len))
                 #vector keys & values
                 for k, v in vector.iteritems():
-                    fp.write('%s%s' % (k, struct.pack('I', v)))
+                    fp.write('%s%s' % (k, struct.pack('=I', v)))
                 fp.write('\n')
 
     @classmethod
@@ -100,7 +100,7 @@ class EncodingDetector(object):
         version = ''
         vectors = {}
         enc_order = {}
-        with open(path, 'r') as fp:
+        with open(path, 'rb') as fp:
             #basic attributes
             version, vect_tuple_length, enc_count = fp.readline().split('\t')
             if MODEL_VERSION != version:
@@ -116,7 +116,7 @@ class EncodingDetector(object):
                 vectors[enc] = {}
                 for j in range(int(vect_len)):
                     key = fp.read(vect_tuple_length)
-                    vectors[enc][key] = struct.unpack('I', fp.read(4))[0]
+                    vectors[enc][key] = struct.unpack('=I', fp.read(4))[0]
                 fp.read(1)
         return EncodingDetector(version, vectors, enc_order.values())
 

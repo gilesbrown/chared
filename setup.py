@@ -10,7 +10,7 @@ from distutils.core import setup
 
 setup(
     name='chared',
-    version='1.2',
+    version='1.2.1',
     description='Character encoding detection tool',
     long_description='''chared is a tool for detecting the character encoding
     of a text in a known language. The language of the text has to be
